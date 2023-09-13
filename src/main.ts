@@ -1,3 +1,4 @@
+import { start_gui } from "./gui";
 import { read_mod } from "./mod_parser";
 
 console.clear();
@@ -9,23 +10,21 @@ type Instrument = {
     finetune: number;
 };
 
-class Channel {
-    volume_slide: number = 0;
-
-    private gainNode: GainNode;
+class PaulaChannel {
+    protected volumeNode: GainNode;
     private paulaNode: AudioWorkletNode;
     private current_instrument: Instrument | null = null;
 
     constructor(node: AudioNode) {
-        this.gainNode = node.context.createGain();
-        this.gainNode.connect(node);
+        this.volumeNode = node.context.createGain();
+        this.volumeNode.connect(node);
 
         this.paulaNode = new AudioWorkletNode(node.context, "paula_processor");
-        this.paulaNode.connect(this.gainNode);
+        this.paulaNode.connect(this.volumeNode);
     }
 
     public setVolume(value: number) {
-        this.gainNode.gain.value = value;
+        this.volumeNode.gain.value = value;
     }
 
     public setInstrument(instrument: Instrument) {
@@ -47,18 +46,21 @@ class Channel {
             period *
             (this.current_instrument === null
                 ? 1
-                : Math.pow(2, this.current_instrument.finetune / 12 / 8)
-            );
+                : Math.pow(2, this.current_instrument.finetune / 12 / 8));
     }
+}
 
-    public tick_effect() {
+class ModChannel extends PaulaChannel {
+    volume_slide: number = 0;
+
+    tick_effect() {
         if (this.volume_slide !== 0) {
-            this.gainNode.gain.value += this.volume_slide;
-            if (this.gainNode.gain.value > 1) {
-                this.gainNode.gain.value = 1;
+            this.volumeNode.gain.value += this.volume_slide;
+            if (this.volumeNode.gain.value > 1) {
+                this.volumeNode.gain.value = 1;
                 this.volume_slide = 0;
-            } else if (this.gainNode.gain.value < 0) {
-                this.gainNode.gain.value = 0;
+            } else if (this.volumeNode.gain.value < 0) {
+                this.volumeNode.gain.value = 0;
                 this.volume_slide = 0;
             }
         }
@@ -81,7 +83,7 @@ const effect_names = [
     "C - Set Volume                          Cxx : volume, 00-40",
     "D - Pattern Break                       Dxx : break position in next patt",
     "E9- Retrig Note                         E9x : retrig from note + x vblanks",
-    "F - Set Speed___________________________Fxx : speed (00-1F) / tempo (20-FF)",
+    "F - Set Speed                           Fxx : speed (00-1F) / tempo (20-FF)",
 ];
 
 (async function () {
@@ -91,19 +93,21 @@ const effect_names = [
     btn.innerText = "Play";
     document.body.append(btn);
 
+    const gui = start_gui();
+
     btn.onclick = async () => {
         const audio_ctx = new AudioContext({ sampleRate: 28867 * 2 });
-        const gain = audio_ctx.createGain();
-        gain.connect(audio_ctx.destination);
-        gain.gain.value = 0.1;
+        const master_volume = audio_ctx.createGain();
+        master_volume.connect(audio_ctx.destination);
+        master_volume.gain.value = 0.1;
 
         await audio_ctx.audioWorklet.addModule("dist/paula_processor.js");
 
         const channels = [
-            new Channel(gain),
-            new Channel(gain),
-            new Channel(gain),
-            new Channel(gain),
+            new ModChannel(master_volume),
+            new ModChannel(master_volume),
+            new ModChannel(master_volume),
+            new ModChannel(master_volume),
         ];
 
         let song_position = 0;
@@ -114,7 +118,7 @@ const effect_names = [
         let ticks_per_row = 7;
 
         (function render(time: number) {
-            const dt = (time - last_time);
+            const dt = time - last_time;
             last_time = time;
 
             ms_accum += dt;
@@ -133,9 +137,10 @@ const effect_names = [
                     const pattern_rows = mod.patterns[pattern_number];
                     const row = pattern_rows[pattern_position];
 
+                    gui.update_state(pattern_rows, pattern_position);
+
                     for (let i = 0; i < 4; i++) {
                         const channel = channels[i];
-
 
                         const ch_note = row[i];
                         if (ch_note.sample_number > 0) {
@@ -152,12 +157,15 @@ const effect_names = [
                         if (ch_note.effect > 0) {
                             console.log("Effect", effect_names[ch_note.effect]);
 
-                            if (ch_note.effect === 0x0C) {
+                            if (ch_note.effect === 0x0c) {
                                 channel.setVolume(ch_note.effect_xy / 64);
-                            } else if (ch_note.effect === 0x0F) {
+                            } else if (ch_note.effect === 0x0f) {
                                 ticks_per_row = ch_note.effect_xy;
-                            } else if (ch_note.effect === 0x0A) {
-                                channel.volume_slide = (ch_note.effect_xy >= 0xF0 ? ch_note.effect_xy >> 4 : -ch_note.effect_xy) / 64;
+                            } else if (ch_note.effect === 0x0a) {
+                                channel.volume_slide =
+                                    (ch_note.effect_xy >= 0xf0
+                                        ? ch_note.effect_xy >> 4
+                                        : -ch_note.effect_xy) / 64;
                             } else {
                                 // throw new Error("Unimplemented effect " + ch_note.effect.toString(16));
                             }
@@ -171,7 +179,6 @@ const effect_names = [
                     }
                 }
             }
-
 
             requestAnimationFrame(render);
         })(0);
